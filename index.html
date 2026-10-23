@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Jelly Pumpkin</title>
+<meta name="description" content="Squishy 3D jelly pumpkins you can drag, stretch and toss around.">
+<style>
+  :root{color-scheme:light}
+  html,body{margin:0;height:100%;overflow:hidden;background:#fff;color:#3d2b4d;
+    font-family:ui-rounded,"SF Pro Rounded",system-ui,-apple-system,"Segoe UI",sans-serif;}
+  canvas{display:block;touch-action:none;outline:none}
+  img{max-width:100%}
+  #title{position:fixed;left:calc(20px + env(safe-area-inset-left,0px));top:calc(16px + env(safe-area-inset-top,0px));font-weight:700;font-size:18px;letter-spacing:.02em;color:#ff7a1a;
+    user-select:none;pointer-events:none}
+  #title span{color:#a24bff}
+  #hud{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);max-width:calc(100% - 32px);
+    padding:9px 16px;border-radius:999px;background:rgba(255,255,255,.75);backdrop-filter:blur(8px);
+    -webkit-backdrop-filter:blur(8px);box-shadow:0 2px 14px rgba(80,40,120,.12);color:#6b5a78;
+    font-size:13px;line-height:1.35;text-align:center;user-select:none;pointer-events:none}
+  #hud b{color:#3d2b4d}
+  #loading{position:fixed;inset:0;display:grid;place-items:center;color:#c9b6d6;font-size:14px}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+} }
+</script>
+</head>
+<body>
+<div id="loading">loading candy…</div>
+<div id="title">Jelly <span>Pumpkin</span></div>
+<div id="hud"><b>Drag</b> to stretch &amp; toss · <b>Double-click</b> to drop a pumpkin · <b>Space</b> to bounce · <b>R</b> to reset</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import * as CANNON from 'cannon-es';
+
+document.getElementById('loading').remove();
+
+/* ---------- renderer / scene ---------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.VSMShadowMap;
+document.body.appendChild(renderer.domElement);
+const canvas = renderer.domElement;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xffffff);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 100);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xf4ece6, 0.7));
+const key = new THREE.DirectionalLight(0xffffff, 2.4);
+key.position.set(3, 9, 4);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -7, right: 7, top: 7, bottom: -7, near: 1, far: 25 });
+key.shadow.radius = 9;
+key.shadow.blurSamples = 20;
+key.shadow.bias = -0.0004;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xfff0e0, 0.8);
+rim.position.set(-5, 3, -4);
+scene.add(rim);
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(80, 80).rotateX(-Math.PI / 2),
+  new THREE.ShadowMaterial({ color: 0x4a3560, opacity: 0.2 }));
+floor.receiveShadow = true;
+scene.add(floor);
+
+/* ---------- physics ---------- */
+const FIX = 1 / 120, G = 9.82;
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -G, 0) });
+world.allowSleep = false;
+const matFloor = new CANNON.Material('floor'), matJelly = new CANNON.Material('jelly');
+world.addContactMaterial(new CANNON.ContactMaterial(matFloor, matJelly, { friction: 0.5, restitution: 0.32 }));
+world.addContactMaterial(new CANNON.ContactMaterial(matJelly, matJelly, { friction: 0.2, restitution: 0.45 }));
+
+const ground = new CANNON.Body({ type: CANNON.Body.STATIC, shape: new CANNON.Plane(), material: matFloor });
+ground.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+world.addBody(ground);
+const mkWall = e => { const b = new CANNON.Body({ type: CANNON.Body.STATIC, shape: new CANNON.Plane(), material: matFloor });
+  b.quaternion.setFromEuler(0, e, 0); world.addBody(b); return b; };
+const wallL = mkWall(Math.PI / 2), wallR = mkWall(-Math.PI / 2), wallB = mkWall(0), wallF = mkWall(Math.PI);
+let W = 3.4, D = 2.0;
+
+function layout() {
+  const aspect = innerWidth / innerHeight;
+  camera.aspect = aspect;
+  W = THREE.MathUtils.clamp(aspect * 2.1, 1.5, 3.4);
+  wallL.position.set(-W, 0, 0); wallR.position.set(W, 0, 0);
+  wallB.position.set(0, 0, -D); wallF.position.set(0, 0, D);
+  const tgt = new THREE.Vector3(0, 0.35, 0), dir = new THREE.Vector3(0, 0.62, 1).normalize();
+  const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const d = Math.max((W + 0.9) / (t * aspect), 2.3 / t);
+  camera.position.copy(tgt).addScaledVector(dir, d);
+  camera.lookAt(tgt);
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+layout();
+addEventListener('resize', layout);
+
+/* ---------- palette & textures ---------- */
+const PALETTE = {
+  orange: { color: '#ffb36b', att: '#ff6200', glow: '#ffe27a', inner: '#1e0900', floor: '#ff8a1f' },
+  purple: { color: '#d4a0ff', att: '#7418ff', glow: '#ffc8ff', inner: '#14051f', floor: '#a24bff' },
+  green:  { color: '#a8f07a', att: '#2fa012', glow: '#f2ff8a', inner: '#0a1600', floor: '#59d63a' },
+  red:    { color: '#ff8f98', att: '#e0001e', glow: '#ffd47a', inner: '#1e0204', floor: '#ff2f45' },
+};
+const maxAniso = renderer.capabilities.getMaxAnisotropy();
+
+// face shapes in "face radians": x = azimuth, y = elevation (up)
+const FACE = (() => {
+  const eyeL = [[-0.52, 0.04], [-0.15, 0.04], [-0.31, 0.31]];
+  const eyeR = eyeL.map(([x, y]) => [-x, y]).reverse();
+  const nose = [[-0.065, -0.05], [0.065, -0.05], [0, 0.05]];
+  const w = 0.5, top = x => -0.13 - 0.05 * (1 - (x / w) ** 2), bot = x => -0.13 - 0.27 * (1 - (x / w) ** 2);
+  const seg = (f, a, b, n) => Array.from({ length: n + 1 }, (_, k) => { const x = a + (b - a) * k / n; return [x, f(x)]; });
+  const mouth = [...seg(top, -w, 0.08, 14), [0.08, top(0.08) - 0.085], [0.19, top(0.19) - 0.085],
+    ...seg(top, 0.19, w, 8), ...seg(bot, w, -0.11, 14), [-0.11, bot(-0.11) + 0.085], [-0.23, bot(-0.23) + 0.085],
+    ...seg(bot, -0.23, -w, 8)];
+  return [eyeL, eyeR, nose, mouth];
+})();
+
+function faceCanvas(bg, paint) {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 512;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, 1024, 512);
+  ctx.save(); ctx.translate(512, 256); ctx.scale(1024 / (2 * Math.PI), -512 / Math.PI);
+  ctx.lineJoin = 'round';
+  paint(ctx);
+  ctx.restore();
+  return c;
+}
+function shapes(ctx, fill, stroke, lw) {
+  for (const poly of FACE) {
+    ctx.beginPath();
+    poly.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+}
+const texCache = {};
+function textures(kind) {
+  if (texCache[kind]) return texCache[kind];
+  const p = PALETTE[kind];
+  const em = faceCanvas(p.inner, ctx => {
+    ctx.shadowColor = p.glow; ctx.shadowBlur = 38;
+    shapes(ctx, p.glow, p.glow, 0.035);
+    ctx.shadowBlur = 0;
+    const g = ctx.createLinearGradient(0, 0.3, 0, -0.4);
+    g.addColorStop(0, '#fffbe8'); g.addColorStop(1, p.glow);
+    shapes(ctx, g, null);
+  });
+  const bump = faceCanvas('#fff', ctx => {
+    for (let k = 6; k >= 1; k--) { const v = 255 - (7 - k) * 30; shapes(ctx, null, `rgb(${v},${v},${v})`, k * 0.014); }
+    shapes(ctx, '#000', '#000', 0.01);
+  });
+  const emissive = new THREE.CanvasTexture(em); emissive.colorSpace = THREE.SRGBColorSpace; emissive.anisotropy = maxAniso;
+  const bumpMap = new THREE.CanvasTexture(bump); bumpMap.anisotropy = maxAniso;
+  return (texCache[kind] = { emissive, bumpMap });
+}
+function radialTexture(stops) {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const ctx = c.getContext('2d'), g = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  stops.forEach(([o, col]) => g.addColorStop(o, col));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 256, 256);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const glowTex = radialTexture([[0, 'rgba(255,255,255,1)'], [0.35, 'rgba(255,255,255,.6)'], [0.7, 'rgba(255,255,255,.15)'], [1, 'rgba(255,255,255,0)']]);
+const blobTex = radialTexture([[0, 'rgba(40,20,60,.9)'], [0.45, 'rgba(40,20,60,.35)'], [1, 'rgba(40,20,60,0)']]);
+const floorQuad = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+
+const stemMat = new THREE.MeshPhysicalMaterial({
+  color: '#7fc24a', transmission: 0.55, thickness: 0.3, roughness: 0.3, ior: 1.45,
+  attenuationColor: '#2c6b14', attenuationDistance: 0.12, clearcoat: 1, clearcoatRoughness: 0.08,
+});
+
+/* ---------- geometry ---------- */
+const WS = 128, HS = 80, COLS = WS + 1;
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+function buildGeometry(R, colR, ribs, seed) {
+  const count = COLS * (HS + 1);
+  const base = new Float32Array(count * 3), uv = new Float32Array(count * 2);
+  const rnd = mulberry(seed), ph1 = rnd() * 6.28, ph2 = rnd() * 6.28, a1 = 0.015 + rnd() * 0.02, a2 = 0.01 + rnd() * 0.015;
+  let minY = Infinity, maxY = -Infinity;
+  for (let j = 0; j <= HS; j++) {
+    const th = j / HS * Math.PI, st = Math.sin(th), ct = Math.cos(th);
+    const y = R * (0.8 * ct - (ct > 0 ? 0.24 : 0.12) * ct * Math.exp(-((st / 0.36) ** 2)));
+    for (let i = 0; i <= WS; i++) {
+      const u = i / WS, ph = (u - 0.5) * Math.PI * 2;
+      const groove = 1 - Math.pow(Math.abs(Math.sin(ph * ribs / 2)), 0.42);
+      const lobe = 1 + a1 * Math.sin(ph + ph1) + a2 * Math.sin(2 * ph + ph2);
+      const r = R * st * (1 - 0.13 * groove * (0.5 + 0.5 * st)) * lobe;
+      const k = j * COLS + i;
+      base[k * 3] = Math.sin(ph) * r; base[k * 3 + 1] = y; base[k * 3 + 2] = Math.cos(ph) * r;
+      uv[k * 2] = u; uv[k * 2 + 1] = 1 - j / HS;
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    }
+  }
+  const off = -colR - minY;                       // rest the visual bottom on the collider bottom
+  for (let k = 0; k < count; k++) base[k * 3 + 1] += off;
+
+  const weld = new Uint32Array(count);
+  for (let j = 0; j <= HS; j++) for (let i = 0; i <= WS; i++) {
+    let w = j * COLS + (i === WS ? 0 : i);
+    if (j === 0) w = 0; if (j === HS) w = HS * COLS;
+    weld[j * COLS + i] = w;
+  }
+  const idx = new Uint32Array(WS * HS * 6); let n = 0;
+  for (let j = 0; j < HS; j++) for (let i = 0; i < WS; i++) {
+    const a = j * COLS + i, b = a + COLS, c = b + 1, d = a + 1;
+    idx[n++] = a; idx[n++] = b; idx[n++] = d; idx[n++] = b; idx[n++] = c; idx[n++] = d;
+  }
+  const triW = idx.map(v => weld[v]);
+  const pos = new Float32Array(base), nrm = new Float32Array(count * 3);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  geometry.setAttribute('normal', new THREE.BufferAttribute(nrm, 3).setUsage(THREE.DynamicDrawUsage));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geometry.setIndex(new THREE.BufferAttribute(idx, 1));
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), R * 2.6);
+  return { geometry, base, pos, nrm, acc: new Float32Array(count * 3), idx, triW, weld, count,
+           minY: minY + off, maxY: maxY + off };
+}
+function computeNormals(g) {
+  const p = g.pos, acc = g.acc, tri = g.idx, tw = g.triW;
+  acc.fill(0);
+  for (let t = 0; t < tri.length; t += 3) {
+    const a = tri[t] * 3, b = tri[t + 1] * 3, c = tri[t + 2] * 3;
+    const e1x = p[b] - p[a], e1y = p[b + 1] - p[a + 1], e1z = p[b + 2] - p[a + 2];
+    const e2x = p[c] - p[a], e2y = p[c + 1] - p[a + 1], e2z = p[c + 2] - p[a + 2];
+    const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    for (let q = 0; q < 3; q++) { const w = tw[t + q] * 3; acc[w] += nx; acc[w + 1] += ny; acc[w + 2] += nz; }
+  }
+  const nr = g.nrm, wl = g.weld;
+  for (let k = 0; k < g.count; k++) {
+    const w = wl[k] * 3, x = acc[w], y = acc[w + 1], z = acc[w + 2];
+    const l = 1 / (Math.sqrt(x * x + y * y + z * z) || 1);
+    nr[k * 3] = x * l; nr[k * 3 + 1] = y * l; nr[k * 3 + 2] = z * l;
+  }
+}
+function stemGeometry(R) {
+  const g = new THREE.CylinderGeometry(0.045, 0.075, 0.3, 18, 14).translate(0, 0.15, 0);
+  const p = g.attributes.position, twist = Math.random() * 0.6;
+  for (let i = 0; i < p.count; i++) {
+    let x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const t = y / 0.3, a = Math.atan2(z, x) + t * twist;
+    const s = (1 + 0.16 * Math.cos(a * 6)) * (1 + 0.9 * Math.pow(1 - t, 5));
+    const r = Math.hypot(x, z) * s;
+    x = Math.cos(a) * r + 0.13 * t * t; z = Math.sin(a) * r;
+    p.setXYZ(i, x, y - 0.02, z);
+  }
+  g.computeVertexNormals();
+  return g.scale(R / 0.6, R / 0.6, R / 0.6);
+}
+
+/* ---------- pumpkin ---------- */
+const pumpkins = [];
+const _v = new CANNON.Vec3(), _v2 = new CANNON.Vec3(), UPC = new CANNON.Vec3(0, 1, 0), FWD = new CANNON.Vec3(0, 0, 1);
+const _q = new THREE.Quaternion(), _t = new THREE.Vector3();
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+class Pumpkin {
+  constructor(kind, R, x, y, z) {
+    this.kind = kind; this.R = R; this.pal = PALETTE[kind];
+    this.colR = R * 0.8;
+    this.g = buildGeometry(R, this.colR, 8, (Math.random() * 1e9) | 0);
+    const tx = textures(kind);
+    this.mat = new THREE.MeshPhysicalMaterial({
+      color: this.pal.color, transmission: 1, thickness: R * 1.2, roughness: 0.12, ior: 1.42,
+      attenuationColor: this.pal.att, attenuationDistance: R * 1.6,
+      clearcoat: 1, clearcoatRoughness: 0.05, specularIntensity: 1,
+      sheen: 0.35, sheenColor: this.pal.color, sheenRoughness: 0.4,
+      emissive: 0xffffff, emissiveMap: tx.emissive, emissiveIntensity: 2.2,
+      bumpMap: tx.bumpMap, bumpScale: 3.5,
+    });
+    this.mesh = new THREE.Mesh(this.g.geometry, this.mat);
+    this.mesh.castShadow = true;
+    this.mesh.userData.p = this;
+    this.stem = new THREE.Mesh(stemGeometry(R), stemMat);
+    this.stem.castShadow = true;
+    this.stemYaw = Math.random() * Math.PI * 2;
+    this.group = new THREE.Group();
+    this.group.add(this.mesh, this.stem);
+    scene.add(this.group);
+
+    this.glow = new THREE.Mesh(floorQuad, new THREE.MeshBasicMaterial({ map: glowTex, color: this.pal.floor,
+      transparent: true, opacity: 0.5, depthWrite: false, toneMapped: false }));
+    this.blob = new THREE.Mesh(floorQuad, new THREE.MeshBasicMaterial({ map: blobTex, transparent: true,
+      opacity: 0.4, depthWrite: false }));
+    this.glow.renderOrder = 1; this.blob.renderOrder = 2;
+    scene.add(this.blob, this.glow);
+
+    this.body = new CANNON.Body({ mass: 1.2 * (R / 0.6) ** 3, shape: new CANNON.Sphere(this.colR), material: matJelly,
+      linearDamping: 0.05, angularDamping: 0.45, position: new CANNON.Vec3(x, y, z) });
+    const ang = Math.atan2(camera.position.x - x, camera.position.z - z) + (Math.random() - 0.5) * 0.9;
+    this.body.quaternion.setFromEuler((Math.random() - 0.5) * 0.4, ang, (Math.random() - 0.5) * 0.4);
+    world.addBody(this.body);
+
+    // jelly state — springs, all in world space except the grab anchor
+    this.pv = new CANNON.Vec3();
+    this.s = 0; this.sv = 0;                                          // squash along world up
+    this.L = new THREE.Vector3(); this.Lv = new THREE.Vector3();      // inertial wobble of the top
+    this.P = new THREE.Vector3(); this.Pv = new THREE.Vector3();      // taffy pull toward the cursor
+    this.Pd = new THREE.Vector3();
+    this.st = new THREE.Vector3(); this.stv = new THREE.Vector3();    // stem lean
+    this.grab = false; this.anchor = new THREE.Vector3(); this.target = new THREE.Vector3();
+    this.active = true; this.settled = false;
+    this.flick = Math.random() * 100;
+    this.aL = new THREE.Vector3(); this.Ll = new THREE.Vector3(); this.Pl = new THREE.Vector3();
+    this.sync(0);
+  }
+
+  preStep() {
+    const b = this.body, q = b.quaternion, m = b.mass, r2 = this.colR * this.colR;
+    // self-righting like a weeble, so it wobbles back upright
+    q.vmult(UPC, _v);
+    b.torque.x += -_v.z * 22 * m * r2;
+    b.torque.z += _v.x * 22 * m * r2;
+    // slowly turn the face back toward the viewer
+    q.vmult(FWD, _v2);
+    let dx = camera.position.x - b.position.x, dz = camera.position.z - b.position.z;
+    const err = Math.atan2(_v2.z * dx - _v2.x * dz, _v2.x * dx + _v2.z * dz);
+    b.torque.y += clamp(err, -1, 1) * 3 * m * r2;
+
+    if (this.grab) {
+      _t.copy(this.anchor).applyQuaternion(_q.set(q.x, q.y, q.z, q.w)).add(b.position);
+      this.Pd.copy(this.target).sub(_t);
+      const k = 40 * m, c = 7 * m;
+      b.applyForce(new CANNON.Vec3(this.Pd.x * k - b.velocity.x * c, this.Pd.y * k - b.velocity.y * c,
+        this.Pd.z * k - b.velocity.z * c));
+      b.angularVelocity.scale(0.97, b.angularVelocity);
+      if (this.Pd.length() > this.R * 1.5) this.Pd.setLength(this.R * 1.5);
+    } else this.Pd.set(0, 0, 0);
+  }
+
+  step(dt) {
+    const v = this.body.velocity, pv = this.pv, R = this.R;
+    const dvx = clamp(v.x - pv.x, -8, 8), dvy = clamp(v.y - pv.y + G * dt, -8, 8), dvz = clamp(v.z - pv.z, -8, 8);
+    pv.copy(v);
+    // squash: proper vertical acceleration (landing!) compresses the body
+    const gs = this.grab ? 0.25 : 1;
+    this.sv += (-260 * this.s - 6 * this.sv) * dt - dvy * 0.75 * gs;
+    this.s = clamp(this.s + this.sv * dt, -0.45, 0.55);
+    // wobble: horizontal kicks make the top lag behind and swing
+    const Lg = 0.5 * R / 0.6, L = this.L, Lv = this.Lv;
+    Lv.x += (-170 * L.x - 4.5 * Lv.x) * dt - dvx * Lg;
+    Lv.z += (-170 * L.z - 4.5 * Lv.z) * dt - dvz * Lg;
+    L.addScaledVector(Lv, dt);
+    if (L.length() > 0.5 * R) L.setLength(0.5 * R);
+    // pull: stiff while held, soft & bouncy once let go
+    const Pk = this.grab ? 380 : 210, Pc = this.grab ? 28 : 3.4;
+    this.Pv.x += (Pk * (this.Pd.x - this.P.x) - Pc * this.Pv.x) * dt;
+    this.Pv.y += (Pk * (this.Pd.y - this.P.y) - Pc * this.Pv.y) * dt;
+    this.Pv.z += (Pk * (this.Pd.z - this.P.z) - Pc * this.Pv.z) * dt;
+    this.P.addScaledVector(this.Pv, dt);
+    // stem leans with the wobble, with its own little lag
+    const k = 1.8 / R;
+    const tx = clamp(L.x * k + this.P.x * 0.3 / R, -0.8, 0.8), tz = clamp(L.z * k + this.P.z * 0.3 / R, -0.8, 0.8);
+    this.stv.x += (150 * (tx - this.st.x) - 3.2 * this.stv.x) * dt - dvx * 0.25;
+    this.stv.z += (150 * (tz - this.st.z) - 3.2 * this.stv.z) * dt - dvz * 0.25;
+    this.st.addScaledVector(this.stv, dt);
+
+    const w = this.body.angularVelocity;
+    this.active = this.grab || this.sv * this.sv + Lv.lengthSq() + this.Pv.lengthSq() + this.stv.lengthSq() > 1e-6
+      || this.P.lengthSq() > 1e-6 || v.x * v.x + v.y * v.y + v.z * v.z > 1e-4 || w.x * w.x + w.y * w.y + w.z * w.z > 1e-4;
+  }
+
+  deform() {
+    const g = this.g, B = g.base, Pos = g.pos, colR = this.colR;
+    const s = this.s, as = 1 + s, ps = 1 / Math.sqrt(as);
+    const ax = this.aL.x, ay = this.aL.y, az = this.aL.z;
+    const pvx = -ax * colR, pvy = -ay * colR, pvz = -az * colR;
+    const Lx = this.Ll.x, Ly = this.Ll.y, Lz = this.Ll.z;
+    const y0 = -colR, yr = 1 / (g.maxY + colR);
+    const Px = this.Pl.x, Py = this.Pl.y, Pz = this.Pl.z, pm = Math.sqrt(Px * Px + Py * Py + Pz * Pz);
+    const pull = pm > 1e-4, nx = Px / (pm || 1), ny = Py / (pm || 1), nz = Pz / (pm || 1);
+    const gx = this.anchor.x, gy = this.anchor.y, gz = this.anchor.z;
+    const invS2 = 1 / (0.9 * this.R * this.R), neck = Math.min(pm / this.R, 1) * 0.35;
+    for (let i = 0, n = g.count * 3; i < n; i += 3) {
+      const bx = B[i], by = B[i + 1], bz = B[i + 2];
+      // squash & stretch around the floor contact, roughly volume preserving
+      const dx = bx - pvx, dy = by - pvy, dz = bz - pvz, al = dx * ax + dy * ay + dz * az;
+      let x = pvx + (dx - ax * al) * ps + ax * al * as;
+      let y = pvy + (dy - ay * al) * ps + ay * al * as;
+      let z = pvz + (dz - az * al) * ps + az * al * as;
+      // wobble, anchored at the bottom
+      let h = (by - y0) * yr; h = h < 0 ? 0 : h > 1 ? 1 : h; h = h * h * (3 - 2 * h);
+      x += Lx * h; y += Ly * h; z += Lz * h;
+      // taffy pull with a thinning neck around the grabbed spot
+      if (pull) {
+        const ex = bx - gx, ey = by - gy, ez = bz - gz;
+        const w = Math.exp(-(ex * ex + ey * ey + ez * ez) * invS2);
+        let pr = ((bx * nx + by * ny + bz * nz) / colR + 1) * 0.5; pr = pr < 0 ? 0 : pr > 1 ? 1 : pr;
+        const ww = w + 0.22 * pr * pr * (1 - w);
+        const d = ex * nx + ey * ny + ez * nz, sq = w * neck;
+        x += Px * ww - (ex - nx * d) * sq;
+        y += Py * ww - (ey - ny * d) * sq;
+        z += Pz * ww - (ez - nz * d) * sq;
+      }
+      Pos[i] = x; Pos[i + 1] = y; Pos[i + 2] = z;
+    }
+    computeNormals(g);
+    g.geometry.attributes.position.needsUpdate = true;
+    g.geometry.attributes.normal.needsUpdate = true;
+  }
+
+  sync(time) {
+    const b = this.body, gp = this.group;
+    gp.position.copy(b.interpolatedPosition);
+    gp.quaternion.set(b.interpolatedQuaternion.x, b.interpolatedQuaternion.y, b.interpolatedQuaternion.z, b.interpolatedQuaternion.w);
+    _q.copy(gp.quaternion).invert();
+    this.aL.set(0, 1, 0).applyQuaternion(_q);
+    this.Ll.copy(this.L).applyQuaternion(_q);
+    this.Pl.copy(this.P).applyQuaternion(_q);
+
+    if (this.active || !this.settled) { this.deform(); this.settled = !this.active; }
+
+    // stem rides the deformed top and leans with its own spring
+    const P = this.g.pos;
+    this.stem.position.set(P[0], P[1] - 0.02 * this.R, P[2]);
+    _t.copy(this.st).applyQuaternion(_q);
+    this.stem.rotation.set(_t.z, this.stemYaw, -_t.x);
+
+    // candle-like flicker of the carved face
+    const f = time * 1.0 + this.flick;
+    this.mat.emissiveIntensity = 2.2 * (0.86 + 0.07 * Math.sin(f * 7.1) + 0.05 * Math.sin(f * 13.7) + 0.03 * Math.sin(f * 23.3));
+
+    // coloured candy light + soft contact shadow on the floor
+    const hgt = Math.max(0, b.interpolatedPosition.y - this.colR), spread = 1 / Math.sqrt(1 + this.s);
+    this.glow.position.set(gp.position.x - 0.12 * this.R, 0.003, gp.position.z - 0.16 * this.R);
+    this.glow.scale.setScalar(this.R * 4.2 * spread * (1 + hgt * 0.35));
+    this.glow.material.opacity = 0.5 / (1 + hgt * 0.9);
+    this.blob.position.set(gp.position.x, 0.004, gp.position.z);
+    this.blob.scale.setScalar(this.R * 2.0 * spread * (1 + hgt * 0.5));
+    this.blob.material.opacity = 0.32 / (1 + hgt * 1.6);
+  }
+
+  poke(amount = 1) {
+    this.sv -= 1.4 * amount;
+    this.Lv.x += (Math.random() - 0.5) * 0.8 * amount;
+    this.Lv.z += (Math.random() - 0.5) * 0.8 * amount;
+    this.active = true;
+  }
+  hop() {
+    const b = this.body;
+    b.velocity.y += 4 + Math.random() * 2.5;
+    b.velocity.x += (Math.random() - 0.5) * 1.5; b.velocity.z += (Math.random() - 0.5) * 1.5;
+    b.angularVelocity.x += (Math.random() - 0.5) * 5; b.angularVelocity.z += (Math.random() - 0.5) * 5;
+    this.sv += 2.5; this.active = true;
+  }
+  dispose() {
+    world.removeBody(this.body);
+    scene.remove(this.group, this.glow, this.blob);
+    this.g.geometry.dispose(); this.mat.dispose(); this.stem.geometry.dispose();
+    this.glow.material.dispose(); this.blob.material.dispose();
+  }
+}
+
+world.addEventListener('preStep', () => { for (const p of pumpkins) p.preStep(); });
+world.addEventListener('postStep', () => { for (const p of pumpkins) p.step(FIX); });
+
+/* ---------- spawning ---------- */
+const KINDS = ['orange', 'purple', 'green', 'red'];
+let kindIdx = 0;
+function spawn(kind, R, x, z, y = 3.5) {
+  const p = new Pumpkin(kind, R, clamp(x, -W + R, W - R), y, clamp(z, -D + R, D - R));
+  pumpkins.push(p);
+  while (pumpkins.length > 14) pumpkins.shift().dispose();
+  return p;
+}
+const timers = [];
+function reset() {
+  timers.splice(0).forEach(clearTimeout);
+  drag = null;
+  while (pumpkins.length) pumpkins.pop().dispose();
+  const s = W / 3.4;
+  const layoutSet = [
+    ['orange', 0.66, -0.9, 0.1], ['purple', 0.58, 0.85, -0.35], ['green', 0.52, -2.4, -0.4],
+    ['red', 0.55, 2.4, 0.35], ['orange', 0.44, 0.1, 1.2], ['purple', 0.42, -1.9, 1.2], ['green', 0.4, 1.9, 1.3],
+  ];
+  layoutSet.forEach(([k, R, x, z], i) =>
+    timers.push(setTimeout(() => spawn(k, R * Math.max(0.75, s), x * s, z, 2.6 + i * 0.35), 120 + i * 170)));
+}
+
+/* ---------- interaction ---------- */
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane(), hit = new THREE.Vector3();
+const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+let drag = null, hover = null;
+function aim(e) { ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(ndc, camera); }
+function pick() { return ray.intersectObjects(pumpkins.map(p => p.mesh), false)[0]; }
+
+canvas.addEventListener('pointerdown', e => {
+  aim(e);
+  const h = pick();
+  if (!h) return;
+  const p = h.object.userData.p, B = p.g.base, f = h.face;
+  p.anchor.set(0, 0, 0);
+  for (const k of [f.a, f.b, f.c]) p.anchor.x += B[k * 3] / 3, p.anchor.y += B[k * 3 + 1] / 3, p.anchor.z += B[k * 3 + 2] / 3;
+  p.target.copy(h.point);
+  p.grab = true; p.poke(0.8);
+  plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()).negate(), h.point);
+  drag = { p, id: e.pointerId };
+  canvas.setPointerCapture(e.pointerId);
+  canvas.style.cursor = 'grabbing';
+});
+canvas.addEventListener('pointermove', e => {
+  aim(e);
+  if (drag) {
+    if (ray.ray.intersectPlane(plane, hit)) {
+      hit.y = clamp(hit.y, 0.1, 4.5);
+      hit.x = clamp(hit.x, -W - 0.4, W + 0.4); hit.z = clamp(hit.z, -D - 0.4, D + 0.4);
+      drag.p.target.copy(hit);
+    }
+    return;
+  }
+  const h = pick(), p = h ? h.object.userData.p : null;
+  if (p && p !== hover) p.poke(0.35);   // a little jiggle when you hover onto one
+  hover = p;
+  canvas.style.cursor = p ? 'grab' : 'default';
+});
+const release = e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  drag.p.grab = false; drag = null;
+  canvas.style.cursor = hover ? 'grab' : 'default';
+};
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('dblclick', e => {
+  aim(e);
+  const h = pick();
+  if (h) return h.object.userData.p.hop();
+  if (ray.ray.intersectPlane(floorPlane, hit)) {
+    const R = 0.42 + Math.random() * 0.24;
+    spawn(KINDS[kindIdx++ % 4], R * Math.max(0.75, W / 3.4), hit.x, hit.z, 4);
+  }
+});
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); pumpkins.forEach(p => p.hop()); }
+  if (e.code === 'KeyR') reset();
+});
+
+/* ---------- loop ---------- */
+reset();
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+  world.step(FIX, dt, 6);
+  for (const p of pumpkins) p.sync(t);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
