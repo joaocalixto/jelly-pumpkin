@@ -95,7 +95,8 @@ const wallL = mkWall(Math.PI / 2), wallR = mkWall(-Math.PI / 2), wallB = mkWall(
 let W = 3.4, D = 2.0;
 
 function layout() {
-  const aspect = innerWidth / innerHeight;
+  // a page laid out at zero size would make every size NaN and freeze the scene
+  const aspect = innerWidth > 0 && innerHeight > 0 ? innerWidth / innerHeight : 4 / 3;
   camera.aspect = aspect;
   W = THREE.MathUtils.clamp(aspect * 2.1, 1.5, 3.4);
   wallL.position.set(-W, 0, 0); wallR.position.set(W, 0, 0);
